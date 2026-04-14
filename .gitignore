@@ -1,0 +1,9 @@
+*.mp3
+*.wav
+*.aiff
+Linea-relazione_frames/
+video/
+*.mov
+*.mp4
+*.prores
+.DS_Store

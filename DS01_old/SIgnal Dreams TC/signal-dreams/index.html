@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Signal Dreams — Dream Screens Track 01</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #080810; }
+    canvas { display: block; width: 100%; height: 100%; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <audio id="audio" src="Signal%20Dreams.mp3" preload="auto" style="display:none"></audio>
+  <script>
+try {
+(function() {
+  'use strict';
+
+  const ENABLE_IMAGE_GHOSTS = false;
+
+  const CONFIG = {
+    planeWidth: 120,
+    planeHeightPercent: 0.7,
+    planeSpacing: 150,
+    baseSpeed: 8,
+    spawnThreshold: 150,
+    gridCols: 16,
+    gridRows: 24,
+    nodeRadius: 2.5,
+    trailAlpha: 0.25,
+    dwellIntervalMin: 8,
+    dwellIntervalMax: 15,
+    dwellDecelDuration: 0.5,
+    dwellHoldMin: 1,
+    dwellHoldMax: 2,
+    dwellAccelDuration: 0.5,
+    audioSmooth: 0.08,
+  };
+
+  const PATTERNS = ['COLUMN', 'BAND', 'SPHERE', 'WAVE', 'CLUSTER'];
+
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  let audioCtx = null;
+  let analyser = null;
+  let source = null;
+  let started = false;
+  let startTime = performance.now();
+  const audioData = { bass: 0, mid: 0, rms: 0, bassSmooth: 0, midSmooth: 0, rmsSmooth: 0 };
+
+  function resize() {
+    canvas.width = Math.max(300, window.innerWidth || 800);
+    canvas.height = Math.max(300, window.innerHeight || 600);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  class Plane {
+    constructor() {
+      this.x = canvas.width + CONFIG.planeWidth / 2 + 60;
+      this.speed = CONFIG.baseSpeed;
+      this.targetSpeed = CONFIG.baseSpeed;
+      this.pattern = PATTERNS[Math.floor(Math.random() * PATTERNS.length)];
+      this.activation = 0.3 + audioData.bassSmooth * 0.5;
+      this.nodes = [];
+      this.dwelling = false;
+      this.dwellTimer = 0;
+      this.dwellPhase = null;
+      this.fillAlpha = 0.06;
+      this.imageId = null;
+      this.initNodes();
+    }
+
+    initNodes() {
+      for (let row = 0; row < CONFIG.gridRows; row++) {
+        for (let col = 0; col < CONFIG.gridCols; col++) {
+          this.nodes.push({ col, row, baseActivation: 0, flicker: Math.random() });
+        }
+      }
+    }
+
+    updateNodeActivations() {
+      const t = (performance.now() - startTime) / 1000;
+      const bassMod = 0.5 + audioData.bassSmooth;
+      const midMod = 0.3 + audioData.midSmooth * 0.7;
+
+      for (const node of this.nodes) {
+        let patternVal = 0;
+        const c = node.col / CONFIG.gridCols;
+        const r = node.row / CONFIG.gridRows;
+
+        switch (this.pattern) {
+          case 'COLUMN':
+            const colCenter = 0.3 + Math.sin(t * 0.1) * 0.2;
+            patternVal = Math.exp(-Math.pow(c - colCenter, 2) * 20);
+            break;
+          case 'BAND':
+            const bandCenter = 0.4 + Math.sin(t * 0.15) * 0.2;
+            patternVal = Math.exp(-Math.pow(r - bandCenter, 2) * 15);
+            break;
+          case 'SPHERE':
+            const cx = 0.5 + Math.sin(t * 0.08) * 0.1;
+            const cy = 0.5 + Math.cos(t * 0.06) * 0.1;
+            patternVal = Math.exp(-((c - cx) ** 2 + (r - cy) ** 2) * 8);
+            break;
+          case 'WAVE':
+            patternVal = (Math.sin(c * Math.PI * 4 + t * 2) * 0.5 + 0.5) * (Math.sin(r * Math.PI * 2 + t) * 0.5 + 0.5);
+            break;
+          case 'CLUSTER':
+            const n = Math.sin(node.col * 1.3 + node.row * 0.7 + t * 0.5) * 0.5 + 0.5;
+            patternVal = n * (0.6 + Math.sin(t * 0.3) * 0.4);
+            break;
+        }
+
+        node.flicker += (Math.random() - 0.5) * 0.1;
+        node.flicker = Math.max(0, Math.min(1, node.flicker));
+        node.baseActivation = patternVal * this.activation * bassMod * (0.8 + node.flicker * 0.4);
+      }
+    }
+  }
+
+  const planes = [];
+  let nextDwellTime = 8 + Math.random() * 7;
+
+  function spawnPlane(visible = false) {
+    const p = new Plane();
+    p.activation = 0.2 + audioData.bassSmooth * 0.6;
+    if (visible) p.x = canvas.width - 80;
+    planes.push(p);
+  }
+
+  function updatePlanes(dt) {
+    if (planes.length === 0 || (planes[planes.length - 1].x < canvas.width - CONFIG.spawnThreshold)) {
+      spawnPlane(planes.length === 0);
+    }
+
+    nextDwellTime -= dt;
+    if (nextDwellTime <= 0) {
+      const visible = planes.filter(pl => pl.x > 0 && pl.x < canvas.width);
+      if (visible.length > 0 && Math.random() < 0.4) {
+        const dwellPlane = visible[Math.floor(visible.length / 2)];
+        dwellPlane.dwelling = true;
+        dwellPlane.dwellPhase = 'decel';
+        dwellPlane.dwellTimer = CONFIG.dwellDecelDuration;
+      }
+      nextDwellTime = CONFIG.dwellIntervalMin + Math.random() * (CONFIG.dwellIntervalMax - CONFIG.dwellIntervalMin);
+    }
+
+    for (let i = planes.length - 1; i >= 0; i--) {
+      const p = planes[i];
+      p.updateNodeActivations();
+
+      if (p.dwelling) {
+        p.dwellTimer -= dt;
+        if (p.dwellPhase === 'decel') {
+          const t2 = 1 - p.dwellTimer / CONFIG.dwellDecelDuration;
+          p.speed = CONFIG.baseSpeed * (1 - t2 * t2);
+          if (p.dwellTimer <= 0) {
+            p.dwellPhase = 'hold';
+            p.dwellTimer = CONFIG.dwellHoldMin + Math.random() * (CONFIG.dwellHoldMax - CONFIG.dwellHoldMin);
+            p.speed = 0;
+          }
+        } else if (p.dwellPhase === 'hold') {
+          if (p.dwellTimer <= 0) {
+            p.dwellPhase = 'accel';
+            p.dwellTimer = CONFIG.dwellAccelDuration;
+          }
+        } else if (p.dwellPhase === 'accel') {
+          const t2 = 1 - p.dwellTimer / CONFIG.dwellAccelDuration;
+          p.speed = CONFIG.baseSpeed * (t2 * t2);
+          if (p.dwellTimer <= 0) {
+            p.dwelling = false;
+            p.speed = CONFIG.baseSpeed;
+          }
+        }
+      }
+
+      if (!p.dwelling) p.speed = CONFIG.baseSpeed;
+      p.x -= p.speed;
+
+      if (p.x < -CONFIG.planeWidth - 20) {
+        planes.splice(i, 1);
+      }
+    }
+  }
+
+  function getPhaseMultiplier() {
+    if (!startTime) return 0;
+    const t = (performance.now() - startTime) / 1000;
+    if (t < 30) return t / 30 * 0.3;
+    if (t < 180) return 0.3 + (t - 30) / 150 * 0.5;
+    if (t < 385) return 0.8;
+    return Math.max(0, 0.8 - (t - 385) / 56 * 0.8);
+  }
+
+  function drawPlane(plane) {
+    const planeHeight = canvas.height * CONFIG.planeHeightPercent;
+    const top = (canvas.height - planeHeight) / 2;
+    const left = plane.x - CONFIG.planeWidth / 2;
+
+    if (ENABLE_IMAGE_GHOSTS) drawImageGhost(plane, ctx);
+
+    const phaseMult = getPhaseMultiplier();
+    const avgActivation = plane.nodes.reduce((s, n) => s + n.baseActivation, 0) / plane.nodes.length;
+    plane.fillAlpha = 0.06 + avgActivation * 0.08 * phaseMult;
+
+    ctx.globalAlpha = plane.fillAlpha;
+    ctx.fillStyle = audioData.midSmooth < 0.2 ? '#0a0820' : '#120a18';
+    ctx.fillRect(left, top, CONFIG.planeWidth, planeHeight);
+    ctx.globalAlpha = 1;
+
+    const cellW = CONFIG.planeWidth / CONFIG.gridCols;
+    const cellH = planeHeight / CONFIG.gridRows;
+
+    ctx.globalCompositeOperation = 'screen';
+
+    for (const node of plane.nodes) {
+      const act = node.baseActivation * phaseMult * (0.5 + audioData.rmsSmooth * 0.5);
+      const px = left + (node.col + 0.5) * cellW;
+      const py = top + (node.row + 0.5) * cellH;
+
+      let colour, alpha, r;
+      if (act < 0.05) {
+        colour = '#1a1a3a';
+        alpha = 0.35;
+        r = CONFIG.nodeRadius * 0.7;
+      } else {
+        if (act < 0.2) colour = '#2a2060';
+        else if (act < 0.4) colour = '#5a3090';
+        else if (act < 0.6) colour = '#7040c0';
+        else colour = '#c0a0ff';
+        alpha = Math.min(0.9, act * 1.5);
+        r = CONFIG.nodeRadius * (0.8 + act * 0.4);
+      }
+
+      let r2, g2, b2;
+      if (colour === '#1a1a3a') { r2=26; g2=26; b2=58; }
+      else if (colour === '#2a2060') { r2=42; g2=32; b2=96; }
+      else if (colour === '#5a3090') { r2=90; g2=48; b2=144; }
+      else if (colour === '#7040c0') { r2=112; g2=64; b2=192; }
+      else { r2=192; g2=160; b2=255; }
+
+      const grad = ctx.createRadialGradient(px, py, 0, px, py, r * 2);
+      grad.addColorStop(0, `rgba(${r2},${g2},${b2},${alpha})`);
+      grad.addColorStop(0.5, `rgba(${r2},${g2},${b2},${alpha*0.4})`);
+      grad.addColorStop(1, 'rgba(26,26,58,0)');
+
+      ctx.beginPath();
+      ctx.arc(px, py, r * 2, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+    }
+
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function drawImageGhost(plane, ctx) {
+    return;
+  }
+
+  function updateAudio() {
+    if (!analyser) return;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(data);
+
+    const sr = audioCtx.sampleRate;
+    const bw = sr / analyser.fftSize;
+    const bassEnd = Math.min(Math.ceil(250 / bw), data.length);
+    const midStart = Math.ceil(250 / bw);
+    const midEnd = Math.min(Math.ceil(4000 / bw), data.length);
+
+    let bass = 0, mid = 0, total = 0;
+    for (let i = 0; i < bassEnd; i++) bass += data[i];
+    for (let i = midStart; i < midEnd; i++) mid += data[i];
+    for (let i = 0; i < data.length; i++) total += data[i];
+
+    audioData.bass = bass / (bassEnd * 255) || 0;
+    audioData.mid = (midEnd - midStart) > 0 ? mid / ((midEnd - midStart) * 255) : 0;
+    audioData.rms = total / (data.length * 255) || 0;
+
+    const a = CONFIG.audioSmooth;
+    audioData.bassSmooth += (audioData.bass - audioData.bassSmooth) * a;
+    audioData.midSmooth += (audioData.mid - audioData.midSmooth) * a;
+    audioData.rmsSmooth += (audioData.rms - audioData.rmsSmooth) * a;
+  }
+
+  function draw() {
+    ctx.fillStyle = `rgba(8,8,16,${CONFIG.trailAlpha})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const dt = 1/60;
+    if (started) updateAudio();
+    updatePlanes(dt);
+
+    for (const plane of planes) {
+      drawPlane(plane);
+    }
+
+    requestAnimationFrame(draw);
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    startTime = performance.now();
+
+    const audioEl = document.getElementById('audio');
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.8;
+
+    if (audioEl) {
+      audioEl.volume = 1;
+      source = audioCtx.createMediaElementSource(audioEl);
+      source.connect(analyser);
+      analyser.connect(audioCtx.destination);
+      audioEl.play().catch(e => console.error('Playback failed:', e));
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }
+
+  canvas.addEventListener('click', start);
+  canvas.addEventListener('touchstart', (e) => { e.preventDefault(); start(); });
+
+  spawnPlane(true);
+  draw();
+})();
+} catch (e) {
+  document.body.innerHTML = '<div style="color:#fff;padding:20px;font-family:sans-serif;">Error: ' + e.message + '</div>';
+  console.error(e);
+}
+  </script>
+</body>
+</html>
